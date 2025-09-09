@@ -3,8 +3,8 @@ import math
 import opensim as osim
 
 # --- EDIT THESE ---
-MODEL_PATH   = r"C:\Users\MoBL2\Documents\OpenSim\4.5\Models\Tug_of_War\Tug_of_War_Millard.osim"
-CONTROLS_XML = r"C:\Users\MoBL2\Documents\OpenSim\4.5\Models\Tug_of_War\Tug_of_War_Millard_controls.xml"
+MODEL_PATH   = r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\Karen\Tug_of_War_Millard_KW_FINAL.osim"
+CONTROLS_XML = r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\Karen\Tug_of_War_Millard_controls_KW_FINAL.xml"
 # ------------------
 
 # Load model and init
