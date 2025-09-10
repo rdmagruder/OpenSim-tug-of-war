@@ -50,7 +50,7 @@ DEFAULT_XML     = Path(r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\defau
 
 # Tournament
 SIM_DURATION    = 1.0
-NUM_GROUPS      = 8
+NUM_GROUPS      = 1
 
 # Outputs
 RESULTS_CSV     = WORK_DIR / "group_stage_results.csv"
@@ -273,10 +273,19 @@ def _copy_student_muscle_params(src_model: osim.Model, dst_model: osim.Model,
     dst_m.set_max_contraction_velocity(src_m.get_max_contraction_velocity())
     dst_m.set_activation_time_constant(src_m.get_activation_time_constant())
     dst_m.set_deactivation_time_constant(src_m.get_deactivation_time_constant())
-    dst_m.set_default_activation(src_m.get_default_activation())   # <-- important
+    dst_m.set_default_activation(0.01)    # <-- important
 
-    # touch geometry so the path is realized; not strictly necessary
-    _ = dst_m.getGeometryPath().getLength(state)
+    lmtu = src_m.get_optimal_fiber_length() + src_m.get_tendon_slack_length()
+
+    # Get the geometry path of the destination muscle
+    pathPoints = dst_m.getGeometryPath().getPathPointSet()
+
+    if dst_muscle_name == 'LeftMuscle':
+        pathPointLocation = osim.PathPoint.safeDownCast(pathPoints.get('muscle2-point1')).get_location()
+        pathPointLocation.set(2, 0.05 + lmtu)  # Move to half the MTU length
+    if dst_muscle_name == 'RightMuscle':
+        pathPointLocation = osim.PathPoint.safeDownCast(pathPoints.get('muscle1-point1')).get_location()
+        pathPointLocation.set(2, -0.05 - lmtu)
 
 
 
@@ -534,6 +543,9 @@ def play_match(left: Entry, right: Entry, base_model: Path, arena_dir: Path) -> 
 
     _copy_student_muscle_params(left_model,  model, 'LeftMuscle',  state)
     _copy_student_muscle_params(right_model, model, 'RightMuscle', state)
+
+    model.finalizeFromProperties()
+    model.finalizeConnections()
 
     combined_model_path = match_dir / "Combined_Tug_of_War.osim"
     model.printToXML(str(combined_model_path))
