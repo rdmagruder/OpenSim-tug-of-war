@@ -1,19 +1,37 @@
 # validate_tug_of_war_osim4.py
 import math
 import opensim as osim
+import pathlib
 
-# --- EDIT THESE ---
-MODEL_PATH   = r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\Karen\Tug_of_War_Millard_KW_FINAL.osim"
-CONTROLS_XML = r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\Karen\Tug_of_War_Millard_controls_KW_FINAL.xml"
-# ------------------
+# --- EDIT THIS ONLY ---
+ENTRY_DIR = pathlib.Path(r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\entries\WyattYoung")
+DEFAULT_XML = pathlib.Path(r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\default_control.xml")
+# ----------------------
 
-# Load model and init
-model = osim.Model(MODEL_PATH)
+# auto-detect files
+osim_files = list(ENTRY_DIR.glob("*.osim"))
+xml_files  = list(ENTRY_DIR.glob("*.xml"))
+
+if len(osim_files) != 1:
+    raise RuntimeError(f"Expected exactly 1 .osim in {ENTRY_DIR}, found {len(osim_files)}.")
+
+MODEL_PATH = osim_files[0]
+
+if len(xml_files) == 1:
+    CONTROLS_XML = xml_files[0]
+    print(f"Found controls file in entry dir: {CONTROLS_XML}")
+else:
+    # fallback
+    CONTROLS_XML = DEFAULT_XML
+    print(f"No controls XML found in {ENTRY_DIR}, using default: {CONTROLS_XML}")
+
+print(f"Using model:   {MODEL_PATH}")
+print(f"Using control: {CONTROLS_XML}")
+
+# Now continue with your validation as before
+model = osim.Model(str(MODEL_PATH))
 state = model.initSystem()
-print(f"Validating model {model.getName()}")
-
-# Load control set
-control_set = osim.ControlSet(CONTROLS_XML)
+control_set = osim.ControlSet(str(CONTROLS_XML))
 
 # Limits (same as original scripts)
 specificTension = 35  # N/cm^2

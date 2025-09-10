@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 import math
+import argparse
 
 import opensim as osim
 
@@ -35,21 +36,20 @@ activationTimeConstantMin, activationTimeConstantMax = 0.010, 0.020
 deactivationTimeConstantMin, deactivationTimeConstantMax = 0.040, 0.060
 deactMinusActivTimeConstMin, deactMinusActivTimeConstMax = 0.030, 0.040
 
-BASE_MODEL_PATH = Path(r"C:/Users/<you>/Documents/OpenSim/4.4/Resources/Models/Tug_of_War/Tug_of_War_Millard.osim")
+# Paths
+BASE_MODEL_PATH = Path(r"C:\Users\MoBL2\Documents\OpenSim\4.5\Models\Tug_of_War\Tug_of_War_Millard.osim")
 ENTRIES_DIR     = Path("entries")
 WORK_DIR        = Path("group_stage_outputs")
+DEFAULT_XML     = Path(r"C:\Users\MoBL2\PycharmProjects\OpenSim-tug-of-war\default_control.xml")  # e.g., in your OpenSim-tug-of-war repo root
+
+# Tournament
 SIM_DURATION    = 1.0
 NUM_GROUPS      = 8
+
+# Outputs
 RESULTS_CSV     = WORK_DIR / "group_stage_results.csv"
 INVALID_CSV     = WORK_DIR / "invalid_entries.csv"
 STRICT_VALIDATE = True  # if True, skip invalid entries entirely; if False, include with warning
-# ----------------------------------------------------------
-BASE_MODEL_PATH = Path(r"C:/Users/<you>/Documents/OpenSim/4.4/Resources/Models/Tug_of_War/Tug_of_War_Millard.osim")
-ENTRIES_DIR     = Path("entries")
-WORK_DIR        = Path("group_stage_outputs")
-SIM_DURATION    = 1.0
-NUM_GROUPS      = 8
-RESULTS_CSV     = WORK_DIR / "group_stage_results.csv"
 # ----------------------------------------------------------
 
 @dataclass
@@ -66,21 +66,71 @@ class MatchResult:
     winner: str | None
     out_dir: Path
 
+def _pick_preferred_xml(xml_paths: List[Path]) -> Path | None:
+    """
+    If any XML contains a ControlLinear named 'LeftMuscle.excitation', prefer that.
+    Otherwise return the first readable ControlSet. If none load, return None.
+    """
+    # First pass: look for explicit LeftMuscle.excitation
+    for p in xml_paths:
+        try:
+            cs = osim.ControlSet(str(p))
+            for i in range(cs.getSize()):
+                c = osim.ControlLinear.safeDownCast(cs.get(i))
+                if c and c.getName() == "LeftMuscle.excitation":
+                    return p
+        except Exception:
+            continue
+    # Second pass: first readable
+    for p in xml_paths:
+        try:
+            _ = osim.ControlSet(str(p))
+            return p
+        except Exception:
+            continue
+    return None
 
 def find_entries(entries_dir: Path) -> List[Entry]:
     """Discover student entries. This raw discovery does not filter by validity.
     Validation happens in run_group_stage() so we can emit a single invalid_entries.csv file.
+    Also supports fallback to DEFAULT_XML if no XML exists, and chooses the best XML when multiple exist.
     """
     entries: List[Entry] = []
     for student_dir in sorted(p for p in entries_dir.iterdir() if p.is_dir()):
         osims = list(student_dir.glob("*.osim"))
-        ctrls = list(student_dir.glob("*.xml"))
-        if len(osims) != 1 or len(ctrls) != 1:
-            print(f"[WARN] '{student_dir.name}': expected 1 .osim and 1 .xml; found {len(osims)} and {len(ctrls)}. Skipping.")
+        xmls  = list(student_dir.glob("*.xml"))
+
+        # Require exactly one .osim
+        if len(osims) != 1:
+            print(f"[WARN] '{student_dir.name}': expected exactly 1 .osim; found {len(osims)}. Skipping.")
             continue
-        entries.append(Entry(name=student_dir.name, model_path=osims[0], controls_path=ctrls[0]))
+        model_path = osims[0]
+
+        # Choose controls:
+        if len(xmls) == 1:
+            controls_path = xmls[0]
+        elif len(xmls) == 0:
+            # Fallback to DEFAULT_XML
+            if DEFAULT_XML.exists():
+                controls_path = DEFAULT_XML
+                print(f"[INFO] '{student_dir.name}': no XML found; using default {DEFAULT_XML}")
+            else:
+                print(f"[WARN] '{student_dir.name}': no XML and default {DEFAULT_XML} not found. Skipping.")
+                continue
+        else:
+            # Multiple XMLs: pick the one with LeftMuscle.excitation if possible
+            chosen = _pick_preferred_xml(xmls)
+            if chosen is None:
+                print(f"[WARN] '{student_dir.name}': multiple XMLs but none loadable; skipping.")
+                continue
+            controls_path = chosen
+            if controls_path.name not in [p.name for p in xmls]:
+                print(f"[INFO] '{student_dir.name}': picked {controls_path.name} from multiple XMLs.")
+
+        entries.append(Entry(name=student_dir.name, model_path=model_path, controls_path=controls_path))
+
     if not entries:
-        raise RuntimeError(f"No valid entries found under {entries_dir.resolve()}.")
+        raise RuntimeError(f"No usable entries found under {entries_dir.resolve()}.")
     return entries
 
 
@@ -224,47 +274,109 @@ def _extract_control(cs: osim.ControlSet, prefer_left: bool) -> osim.ControlLine
 
 
 def _merge_controls(left_ctrl_path: Path, right_ctrl_path: Path, out_path: Path) -> None:
+    """
+    Build a ControlSet XML containing two ControlLinear controls:
+      - LeftMuscle.excitation  (prefer 'LeftMuscle.excitation' in left file, else first)
+      - RightMuscle.excitation (prefer first control in right file)
+    We hand-serialize minimal XML compatible with OpenSim 4.x.
+    """
     left_cs  = osim.ControlSet(str(left_ctrl_path))
     right_cs = osim.ControlSet(str(right_ctrl_path))
 
-    cl = _extract_control(left_cs, prefer_left=True)
+    cl = _extract_control(left_cs,  prefer_left=True)
     cr = _extract_control(right_cs, prefer_left=False)
 
-    merged = osim.ControlSet()
-    cl_new = osim.ControlLinear(cl)
-    cl_new.setName("LeftMuscle.excitation")
-    merged.adoptAndAppend(cl_new)
+    def _serialize_controllinear_minimal(name: str, ctrl: osim.ControlLinear) -> str:
+        nodes = ctrl.getControlValues()
+        node_xml_parts = []
+        for i in range(nodes.getSize()):
+            t = nodes.get(i).getTime()
+            v = nodes.get(i).getValue()
+            node_xml_parts.append(
+                "                    <ControlLinearNode>\n"
+                f"                        <t>{t}</t>\n"
+                f"                        <value>{v}</value>\n"
+                "                    </ControlLinearNode>\n"
+            )
+        nodes_block = "".join(node_xml_parts)
 
-    cr_new = osim.ControlLinear(cr)
-    cr_new.setName("RightMuscle.excitation")
-    merged.adoptAndAppend(cr_new)
+        # Minimal, safe subset of tags
+        return (
+            f'            <ControlLinear name="{name}">\n'
+            f"                <is_model_control>true</is_model_control>\n"
+            f"                <extrapolate>true</extrapolate>\n"
+            f"                <x_nodes>\n{nodes_block}                </x_nodes>\n"
+            f"                <min_nodes />\n"
+            f"                <max_nodes />\n"
+            f"            </ControlLinear>\n"
+        )
 
-    doc = osim.XMLDocument()
-    doc.setRootElement(merged)
-    doc.write(str(out_path))
+    left_xml  = _serialize_controllinear_minimal("LeftMuscle.excitation",  cl)
+    right_xml = _serialize_controllinear_minimal("RightMuscle.excitation", cr)
+
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<OpenSimDocument Version="40500">\n'
+        '    <ControlSet name="Control Set">\n'
+        '        <objects>\n'
+        f"{left_xml}"
+        f"{right_xml}"
+        '        </objects>\n'
+        '        <groups />\n'
+        '    </ControlSet>\n'
+        '</OpenSimDocument>\n'
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(xml)
 
 
-def _run_forward(model_path: Path, controls_xml: Path, out_dir: Path, t0: float = 0.0, tf: float = SIM_DURATION) -> float:
+
+def _run_forward(model_path: Path, controls_xml: Path, out_dir: Path,
+                 t0: float = 0.0, tf: float = SIM_DURATION) -> float:
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load model and init
+    model = osim.Model(str(model_path))
+    _ = model.initSystem()  # ensure model is realized
+
+    # Configure tool — pass the actual Model object (don’t rely on setModelFilename)
     tool = osim.ForwardTool()
-    tool.setModelFilename(str(model_path))
+    tool.setModel(model)
     tool.setControlsFileName(str(controls_xml))
     tool.setResultsDir(str(out_dir))
     tool.setInitialTime(t0)
     tool.setFinalTime(tf)
-    tool.setSolveForEquilibriumForAuxiliaryStates(True)
+
+    # Some builds don’t expose these; skip if missing
+    try:
+        tool.setSolveForEquilibriumForAuxiliaryStates(True)
+    except AttributeError:
+        try:
+            tool.setSolveForEquilibriumForActuatorStates(True)
+        except AttributeError:
+            pass
+
     tool.run()
 
-    states_files = list(out_dir.glob(f"*states.sto"))
+    # Read final block_tz from states
+    states_files = list(out_dir.glob("*states.sto"))
     if not states_files:
         raise RuntimeError(f"No states.sto found in {out_dir}")
     states_path = sorted(states_files)[-1]
+
     table = osim.TimeSeriesTable(str(states_path))
     labels = list(table.getColumnLabels())
-    tz_cols = [i for i, s in enumerate(labels) if 'block_tz' in s]
-    final_row = table.getNumRows() - 1
-    final_tz = table.getMatrix().get(final_row, tz_cols[0])
-    return float(final_tz)
+    tz_cols = [i for i, s in enumerate(labels) if "block_tz" in s]
+    if not tz_cols:
+        raise RuntimeError("Could not locate 'block_tz' in states table labels.")
+
+    last_idx = table.getNumRows() - 1
+    row = table.getRowAtIndex(last_idx)  # <-- use index-based accessor
+    final_tz = float(row[tz_cols[0]])
+    return final_tz
+
 
 
 def play_match(left: Entry, right: Entry, base_model: Path, arena_dir: Path) -> MatchResult:
@@ -280,7 +392,7 @@ def play_match(left: Entry, right: Entry, base_model: Path, arena_dir: Path) -> 
     _copy_student_muscle_params(right_model, model, 'RightMuscle', state)
 
     combined_model_path = match_dir / "Combined_Tug_of_War.osim"
-    model.print(str(combined_model_path))
+    model.printToXML(str(combined_model_path))
 
     merged_controls_path = match_dir / "Combined_controls.xml"
     _merge_controls(left.controls_path, right.controls_path, merged_controls_path)

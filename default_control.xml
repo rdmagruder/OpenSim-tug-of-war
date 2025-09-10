@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<OpenSimDocument Version="40500">
+	<ControlSet name="Control Set">
+		<objects>
+			<ControlLinear name="LeftMuscle.excitation">
+				<is_model_control>true</is_model_control>
+				<extrapolate>true</extrapolate>
+				<default_min>0.02</default_min>
+				<default_max>1</default_max>
+				<filter_on>false</filter_on>
+				<use_steps>false</use_steps>
+				<x_nodes>
+					<ControlLinearNode>
+						<t>0</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.10000000000000001</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.20000000000000001</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.29999999999999999</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.40000000000000002</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.5</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.59999999999999998</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.69999999999999996</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.80000000000000004</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>0.90000000000000002</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+					<ControlLinearNode>
+						<t>1</t>
+						<value>0.4</value>
+					</ControlLinearNode>
+				</x_nodes>
+				<min_nodes />
+				<max_nodes />
+				<kp>100</kp>
+				<kv>20</kv>
+			</ControlLinear>
+		</objects>
+		<groups />
+	</ControlSet>
+</OpenSimDocument>
