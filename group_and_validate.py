@@ -1,8 +1,17 @@
 """
-Group-stage evaluator for the OpenSim Tug-of-War competition (Python, OpenSim 4.x)
+Edited from 'combineTugOfWarEntriesAndValidate.py' by Chris Dembia, Carmichael Ong
+Author: MoBL (R. Daniel Magruder)
 
-Update: Control file handling
+With great muscle power comes great responsibility (to prevent doping).
+
 -----------------------------
+
+Group-stage evaluator for the OpenSim Tug-of-War competition (Python, OpenSim 4.x)
+http://simtk-confluence.stanford.edu:8080/display/OpenSim/Designing+a+Muscle+for+a+Tug-of-War+Competition
+This script only works with Millard muscles.
+
+Organize folders as entries/<student>/*.osim and *.xml
+
 Now supports student-submitted XML files that may already contain both Left and Right controls.
 Logic:
  • If the XML has a control explicitly named "LeftMuscle.excitation", we take that for Left side.
