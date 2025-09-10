@@ -239,12 +239,15 @@ def _run_forward(model_path: Path, controls_xml: Path, out_dir: Path,
 def _copy_student_muscle_params(src_model: osim.Model, dst_model: osim.Model,
                                 dst_muscle_name: str, state: osim.State) -> None:
     Millard = osim.Millard2012EquilibriumMuscle
+
+    # pick student's tuned muscle (you may already have a helper for this)
     src_muscle_base = src_model.getMuscles().get('LeftMuscle')
     src_m = Millard.safeDownCast(src_muscle_base)
 
     dst_muscle_base = dst_model.getMuscles().get(dst_muscle_name)
     dst_m = Millard.safeDownCast(dst_muscle_base)
 
+    # --- copy ALL key properties, including default_activation ---
     dst_m.set_max_isometric_force(src_m.get_max_isometric_force())
     dst_m.set_optimal_fiber_length(src_m.get_optimal_fiber_length())
     dst_m.set_tendon_slack_length(src_m.get_tendon_slack_length())
@@ -252,7 +255,11 @@ def _copy_student_muscle_params(src_model: osim.Model, dst_model: osim.Model,
     dst_m.set_max_contraction_velocity(src_m.get_max_contraction_velocity())
     dst_m.set_activation_time_constant(src_m.get_activation_time_constant())
     dst_m.set_deactivation_time_constant(src_m.get_deactivation_time_constant())
+    dst_m.set_default_activation(src_m.get_default_activation())   # <-- important
+
+    # touch geometry so the path is realized; not strictly necessary
     _ = dst_m.getGeometryPath().getLength(state)
+
 
 def play_match(left: Entry, right: Entry, base_model: Path, arena_dir: Path) -> MatchResult:
     match_dir = arena_dir / f"{left.name}_vs_{right.name}"

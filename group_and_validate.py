@@ -97,37 +97,36 @@ def _pick_preferred_xml(xml_paths: List[Path]) -> Path | None:
     return None
 
 def find_entries(entries_dir: Path) -> List[Entry]:
-    """Discover student entries. This raw discovery does not filter by validity.
-    Validation happens in run_group_stage() so we can emit a single invalid_entries.csv file.
-    Also supports fallback to DEFAULT_XML if no XML exists, and chooses the best XML when multiple exist.
+    """Discover student entries for the group stage.
+    Strict mode: requires exactly one .osim AND at least one .xml in each student folder.
+    If multiple XMLs exist, prefer the one containing 'LeftMuscle.excitation'.
+    Students without any XML are DISQUALIFIED (skipped).
     """
     entries: List[Entry] = []
+    dq_no_xml: List[str] = []
+
     for student_dir in sorted(p for p in entries_dir.iterdir() if p.is_dir()):
         osims = list(student_dir.glob("*.osim"))
         xmls  = list(student_dir.glob("*.xml"))
 
         # Require exactly one .osim
         if len(osims) != 1:
-            print(f"[WARN] '{student_dir.name}': expected exactly 1 .osim; found {len(osims)}. Skipping.")
+            print(f"[DQ] '{student_dir.name}': expected exactly 1 .osim; found {len(osims)}. Disqualified.")
             continue
         model_path = osims[0]
 
-        # Choose controls:
-        if len(xmls) == 1:
+        # Require at least one .xml (NO fallback)
+        if len(xmls) == 0:
+            print(f"[DQ] '{student_dir.name}': no .xml control file submitted. Disqualified.")
+            dq_no_xml.append(student_dir.name)
+            continue
+        elif len(xmls) == 1:
             controls_path = xmls[0]
-        elif len(xmls) == 0:
-            # Fallback to DEFAULT_XML
-            if DEFAULT_XML.exists():
-                controls_path = DEFAULT_XML
-                print(f"[INFO] '{student_dir.name}': no XML found; using default {DEFAULT_XML}")
-            else:
-                print(f"[WARN] '{student_dir.name}': no XML and default {DEFAULT_XML} not found. Skipping.")
-                continue
         else:
             # Multiple XMLs: pick the one with LeftMuscle.excitation if possible
             chosen = _pick_preferred_xml(xmls)
             if chosen is None:
-                print(f"[WARN] '{student_dir.name}': multiple XMLs but none loadable; skipping.")
+                print(f"[DQ] '{student_dir.name}': multiple XMLs but none loadable. Disqualified.")
                 continue
             controls_path = chosen
             if controls_path.name not in [p.name for p in xmls]:
@@ -135,9 +134,14 @@ def find_entries(entries_dir: Path) -> List[Entry]:
 
         entries.append(Entry(name=student_dir.name, model_path=model_path, controls_path=controls_path))
 
+    if dq_no_xml:
+        print(f"[SUMMARY] Disqualified (missing XML): {', '.join(dq_no_xml)}")
+
     if not entries:
         raise RuntimeError(f"No usable entries found under {entries_dir.resolve()}.")
+
     return entries
+
 
 
 def group_students(entries: List[Entry], k_groups: int) -> Dict[str, List[Entry]]:
@@ -250,13 +254,18 @@ def _validate_controlset_for_left(cs: osim.ControlSet) -> str:
 
 # ---------- OpenSim helpers ----------
 
-def _copy_student_muscle_params(src_model: osim.Model, dst_model: osim.Model, dst_muscle_name: str, state: osim.State) -> None:
-    src_muscle_base = src_model.getMuscles().get('LeftMuscle')
+def _copy_student_muscle_params(src_model: osim.Model, dst_model: osim.Model,
+                                dst_muscle_name: str, state: osim.State) -> None:
     Millard = osim.Millard2012EquilibriumMuscle
+
+    # pick student's tuned muscle (you may already have a helper for this)
+    src_muscle_base = src_model.getMuscles().get('LeftMuscle')
     src_m = Millard.safeDownCast(src_muscle_base)
+
     dst_muscle_base = dst_model.getMuscles().get(dst_muscle_name)
     dst_m = Millard.safeDownCast(dst_muscle_base)
-    # Copy key properties
+
+    # --- copy ALL key properties, including default_activation ---
     dst_m.set_max_isometric_force(src_m.get_max_isometric_force())
     dst_m.set_optimal_fiber_length(src_m.get_optimal_fiber_length())
     dst_m.set_tendon_slack_length(src_m.get_tendon_slack_length())
@@ -264,7 +273,11 @@ def _copy_student_muscle_params(src_model: osim.Model, dst_model: osim.Model, ds
     dst_m.set_max_contraction_velocity(src_m.get_max_contraction_velocity())
     dst_m.set_activation_time_constant(src_m.get_activation_time_constant())
     dst_m.set_deactivation_time_constant(src_m.get_deactivation_time_constant())
+    dst_m.set_default_activation(src_m.get_default_activation())   # <-- important
+
+    # touch geometry so the path is realized; not strictly necessary
     _ = dst_m.getGeometryPath().getLength(state)
+
 
 
 def _extract_control(cs: osim.ControlSet, prefer_left: bool) -> osim.ControlLinear:
