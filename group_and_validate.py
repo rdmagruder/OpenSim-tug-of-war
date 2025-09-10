@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import math
 import argparse
+import array as pyarray
+try:
+    import numpy as np
+    _HAS_NP = True
+except Exception:
+    _HAS_NP = False
 
 import opensim as osim
 
@@ -331,36 +337,163 @@ def _merge_controls(left_ctrl_path: Path, right_ctrl_path: Path, out_path: Path)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(xml)
 
+def _build_function_for(times, vals, name: str):
+    """
+    Build an OpenSim Function from knot vectors in a way that works across Python bindings.
+    Try:
+      - PiecewiseLinearFunction (NumPy then C-arrays then ArrayDouble)
+      - GCVSpline (degree=1 then degree=3; NumPy then C-arrays)
+      - SimmSpline (as a last resort)
+    """
+    # Defensive: ensure plain floats and strictly increasing times (you already dedupe/sort earlier)
+    times = [float(t) for t in times]
+    vals  = [float(v) for v in vals]
+
+    # --- PiecewiseLinearFunction paths ---
+    if _HAS_NP:
+        t_np = np.ascontiguousarray(times, dtype=float)
+        v_np = np.ascontiguousarray(vals,  dtype=float)
+        for ctor in (
+            lambda: osim.PiecewiseLinearFunction(len(times), t_np, v_np, name),
+            lambda: osim.PiecewiseLinearFunction(len(times), t_np, v_np),
+        ):
+            try:
+                return ctor()
+            except TypeError:
+                pass
+
+    t_arr = pyarray.array('d', times)
+    v_arr = pyarray.array('d', vals)
+    for ctor in (
+        lambda: osim.PiecewiseLinearFunction(len(times), t_arr, v_arr, name),
+        lambda: osim.PiecewiseLinearFunction(len(times), t_arr, v_arr),
+    ):
+        try:
+            return ctor()
+        except TypeError:
+            pass
+
+    try:
+        t_os = osim.ArrayDouble(); v_os = osim.ArrayDouble()
+        for t in times: t_os.append(t)
+        for v in vals:  v_os.append(v)
+        for ctor in (
+            lambda: osim.PiecewiseLinearFunction(len(times), t_os, v_os, name),
+            lambda: osim.PiecewiseLinearFunction(len(times), t_os, v_os),
+        ):
+            try:
+                return ctor()
+            except TypeError:
+                pass
+    except Exception:
+        pass
+
+    # --- GCVSpline paths (robust across builds) ---
+    # degree=1 ≈ piecewise-linear; degree=3 = cubic
+    if _HAS_NP:
+        t_np = np.ascontiguousarray(times, dtype=float)
+        v_np = np.ascontiguousarray(vals,  dtype=float)
+        for deg in (1, 3):
+            for ctor in (
+                lambda: osim.GCVSpline(deg, len(times), t_np, v_np),
+            ):
+                try:
+                    return ctor()
+                except TypeError:
+                    pass
+
+    for deg in (1, 3):
+        for ctor in (
+            lambda: osim.GCVSpline(deg, len(times), t_arr, v_arr),
+        ):
+            try:
+                return ctor()
+            except TypeError:
+                pass
+
+    # --- Last resort: SimmSpline ---
+    for ctor in (
+        lambda: osim.SimmSpline(len(times), t_arr, v_arr),
+        lambda: osim.SimmSpline(len(times), t_os,  v_os) if 't_os' in locals() else None,
+    ):
+        try:
+            f = ctor() if ctor else None
+            if f is not None:
+                return f
+        except Exception:
+            pass
+
+    raise RuntimeError(
+        f"Could not construct a Function. n={len(times)}, times[:3]={times[:3]}, vals[:3]={vals[:3]}"
+    )
+
 
 
 def _run_forward(model_path: Path, controls_xml: Path, out_dir: Path,
                  t0: float = 0.0, tf: float = SIM_DURATION) -> float:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model and init
-    model = osim.Model(str(model_path))
-    _ = model.initSystem()  # ensure model is realized
+    # Absolute, POSIX-style paths (OpenSim parses these most reliably)
+    model_abs    = model_path.resolve()
+    controls_abs = controls_xml.resolve()
+    results_abs  = out_dir.resolve()
+    model_posix    = model_abs.as_posix()
+    controls_posix = controls_abs.as_posix()
+    results_posix  = results_abs.as_posix()
 
-    # Configure tool — pass the actual Model object (don’t rely on setModelFilename)
-    tool = osim.ForwardTool()
+    # Double-check files exist before we hand them to the tool
+    if not model_abs.exists():
+        raise FileNotFoundError(f"Model file missing: {model_abs}")
+    if not controls_abs.exists():
+        raise FileNotFoundError(f"Controls XML missing: {controls_abs}")
+
+    # Load the model so we can also pass the object to the tool after parsing
+    model = osim.Model(str(model_abs))
+    _ = model.initSystem()
+
+    # Write a minimal ForwardTool setup that includes a ControlSetController
+    setup_path = out_dir / "setup_forward.xml"
+    setup_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<OpenSimDocument Version="40500">
+  <ForwardTool name="{model.getName()}">
+    <model_file>{model_posix}</model_file>
+    <replace_force_set>false</replace_force_set>
+    <force_set_files />
+    <results_directory>{results_posix}</results_directory>
+    <output_precision>8</output_precision>
+    <initial_time>{t0}</initial_time>
+    <final_time>{tf}</final_time>
+    <solve_for_equilibrium_for_auxiliary_states>true</solve_for_equilibrium_for_auxiliary_states>
+    <maximum_number_of_integrator_steps>20000</maximum_number_of_integrator_steps>
+    <maximum_integrator_step_size>1</maximum_integrator_step_size>
+    <minimum_integrator_step_size>1e-008</minimum_integrator_step_size>
+    <integrator_error_tolerance>1e-005</integrator_error_tolerance>
+    <AnalysisSet name="Analyses">
+      <objects />
+      <groups />
+    </AnalysisSet>
+    <ControllerSet name="Controllers">
+      <objects>
+        <ControlSetController>
+          <controls_file>{controls_posix}</controls_file>
+        </ControlSetController>
+      </objects>
+      <groups />
+    </ControllerSet>
+    <external_loads_file />
+    <use_specified_dt>false</use_specified_dt>
+  </ForwardTool>
+</OpenSimDocument>
+"""
+    setup_path.write_text(setup_xml, encoding="utf-8")
+
+    # Construct the tool FROM XML (so it parses the controller),
+    # then set the already-loaded model object
+    tool = osim.ForwardTool(str(setup_path))
     tool.setModel(model)
-    tool.setControlsFileName(str(controls_xml))
-    tool.setResultsDir(str(out_dir))
-    tool.setInitialTime(t0)
-    tool.setFinalTime(tf)
-
-    # Some builds don’t expose these; skip if missing
-    try:
-        tool.setSolveForEquilibriumForAuxiliaryStates(True)
-    except AttributeError:
-        try:
-            tool.setSolveForEquilibriumForActuatorStates(True)
-        except AttributeError:
-            pass
-
     tool.run()
 
-    # Read final block_tz from states
+    # Read final block_tz
     states_files = list(out_dir.glob("*states.sto"))
     if not states_files:
         raise RuntimeError(f"No states.sto found in {out_dir}")
@@ -371,11 +504,9 @@ def _run_forward(model_path: Path, controls_xml: Path, out_dir: Path,
     tz_cols = [i for i, s in enumerate(labels) if "block_tz" in s]
     if not tz_cols:
         raise RuntimeError("Could not locate 'block_tz' in states table labels.")
-
     last_idx = table.getNumRows() - 1
-    row = table.getRowAtIndex(last_idx)  # <-- use index-based accessor
-    final_tz = float(row[tz_cols[0]])
-    return final_tz
+    row = table.getRowAtIndex(last_idx)
+    return float(row[tz_cols[0]])
 
 
 
@@ -403,42 +534,48 @@ def play_match(left: Entry, right: Entry, base_model: Path, arena_dir: Path) -> 
     return MatchResult(left=left.name, right=right.name, final_tz=final_tz, winner=winner, out_dir=match_dir)
 
 
-def run_group_stage():
+def run_group_stage(open_division: bool = False):
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     entries = find_entries(ENTRIES_DIR)
     if not BASE_MODEL_PATH.exists():
         raise FileNotFoundError(f"Baseline model not found: {BASE_MODEL_PATH}")
 
-    # Validate entries first; collect reasons
-    invalid_rows = []
-    valid_entries: List[Entry] = []
-    for e in entries:
-        err = _validate_student_model(e.model_path)
-        try:
-            cs = osim.ControlSet(str(e.controls_path))
-            err += _validate_controlset_for_left(cs)
-        except Exception as ex:
-            err += f"Failed to read controls: {ex}"
-        if err:
-            print(f"[INVALID] {e.name}:{err}")
-            invalid_rows.append([e.name, str(e.model_path), str(e.controls_path), err.strip()])
-            if not STRICT_VALIDATE:
-                print(f"[WARN] Including {e.name} despite validation issues (STRICT_VALIDATE=False).")
+    if open_division:
+        print("[INFO] Open division: skipping all validation (muscle + controls).")
+        valid_entries = entries
+        invalid_rows = []
+    else:
+        # ---- existing validation block stays the same ----
+        invalid_rows = []
+        valid_entries: List[Entry] = []
+        for e in entries:
+            err = _validate_student_model(e.model_path)
+            try:
+                cs = osim.ControlSet(str(e.controls_path))
+                err += _validate_controlset_for_left(cs)
+            except Exception as ex:
+                err += f"Failed to read controls: {ex}"
+            if err:
+                print(f"[INVALID] {e.name}:{err}")
+                invalid_rows.append([e.name, str(e.model_path), str(e.controls_path), err.strip()])
+                if not STRICT_VALIDATE:
+                    print(f"[WARN] Including {e.name} despite validation issues (STRICT_VALIDATE=False).")
+                    valid_entries.append(e)
+            else:
                 valid_entries.append(e)
-        else:
-            valid_entries.append(e)
 
-    # Save invalid report
-    with open(INVALID_CSV, 'w', newline='') as inv:
-        w = csv.writer(inv)
-        w.writerow(["student", "model", "controls", "issues"])
-        for row in invalid_rows:
-            w.writerow(row)
-    if invalid_rows:
-        print(f"Saved invalid entry report: {INVALID_CSV}")
+        # Save invalid report (unchanged)
+        with open(INVALID_CSV, 'w', newline='') as inv:
+            w = csv.writer(inv)
+            w.writerow(["student", "model", "controls", "issues"])
+            for row in invalid_rows:
+                w.writerow(row)
+        if invalid_rows:
+            print(f"Saved invalid entry report: {INVALID_CSV}")
 
-    if not valid_entries:
-        raise RuntimeError("All entries were invalid; nothing to simulate.")
+        if not valid_entries:
+            raise RuntimeError("All entries were invalid; nothing to simulate.")
+
 
     groups = group_students(valid_entries, NUM_GROUPS)
 
@@ -491,4 +628,20 @@ def run_group_stage():
 
 
 if __name__ == "__main__":
-    run_group_stage()
+    parser = argparse.ArgumentParser(description="Tug-of-War group stage")
+    parser.add_argument(
+        "--open", action="store_true",
+        help="Open division: skip all validation (muscle + activation checks)"
+    )
+    parser.add_argument(
+        "--groups", type=int, default=NUM_GROUPS,
+        help=f"Number of groups (default {NUM_GROUPS})"
+    )
+    args = parser.parse_args()
+
+    # Override NUM_GROUPS if the user specified --groups
+    NUM_GROUPS = args.groups
+
+    run_group_stage(open_division=args.open)
+
+
